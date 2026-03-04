@@ -1,0 +1,12 @@
+venv/
+__pycache__/
+*.pyc
+.DS_Store
+uploads/
+*.zip
+.env
+.claude/
+CMCF801D1-JPG_R1/
+Product Label/
+OneDrive_1_4-3-2026/
+P.PY
