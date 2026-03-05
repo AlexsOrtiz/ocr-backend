@@ -3,10 +3,10 @@ __pycache__/
 *.pyc
 .DS_Store
 uploads/
+storage/
 *.zip
 .env
 .claude/
-CMCF801D1-JPG_R1/
-Product Label/
+sample_zips/
 OneDrive_1_4-3-2026/
 P.PY

@@ -3,10 +3,6 @@ import numpy as np
 
 
 def rotate_image(image: np.ndarray, angle: float) -> np.ndarray:
-    """Rotate an image by the given angle (degrees) around its center (Z-axis).
-
-    Uses white background for the border areas created by rotation.
-    """
     h, w = image.shape[:2]
     center = (w / 2, h / 2)
     rotation_matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
@@ -27,10 +23,6 @@ def rotate_image(image: np.ndarray, angle: float) -> np.ndarray:
 
 
 def generate_rotated_images(image: np.ndarray, angles: list[float]) -> list[tuple[float, np.ndarray]]:
-    """Generate rotated versions of an image at the specified angles.
-
-    Returns list of (angle, rotated_image) tuples.
-    """
     results = []
     for angle in angles:
         if angle == 0:

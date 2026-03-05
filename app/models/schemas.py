@@ -28,3 +28,11 @@ class ProcessingResponse(BaseModel):
 
 class RotationConfig(BaseModel):
     angles: list[float] = [0, 20, 40, 60, 80, 100, 120, 140, 160, 180, 200, 220, 240, 260, 280, 300, 320, 340]
+
+
+class RotationViewResponse(BaseModel):
+    job_id: str
+    frame_count: int
+    frame_paths: list[str]
+    gif_path: str | None
+    storage_dir: str

@@ -1,3 +1,4 @@
+import os
 import re
 
 import cv2
@@ -9,14 +10,17 @@ from app.models.schemas import OCRResult
 
 try:
     import pytesseract
-
     TESSERACT_AVAILABLE = True
+    for _tesseract_cmd in ("/opt/homebrew/bin/tesseract", "/usr/local/bin/tesseract"):
+        if os.path.isfile(_tesseract_cmd):
+            pytesseract.pytesseract.tesseract_cmd = _tesseract_cmd
+            break
 except ImportError:
     TESSERACT_AVAILABLE = False
 
 _reader: easyocr.Reader | None = None
 SKU_ALLOWLIST = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-+/"
-SKU_PREFIXES = ("CMCF", "CMC", "DCF", "DCN", "DWE", "DW", "PBT", "GV", "D")
+SKU_PREFIXES = ("CMCF", "CMC", "DCF", "DCB", "DCG", "DCS", "DCN", "DCLE", "DWE", "DW", "PBT", "GV", "D")
 MAX_REGION_CANDIDATES = 2
 PREFIX_REPAIRS = {
     "OWE": "DWE",
@@ -27,12 +31,19 @@ PREFIX_REPAIRS = {
     "0CF": "DCF",
     "OCN": "DCN",
     "0CN": "DCN",
+    "OCG": "DCG",
+    "0CG": "DCG",
+    "6CG": "DCG",
 }
 SKU_SHAPE_RULES = {
     "CMCF": (3, 4, True),
     "CMC": (3, 4, True),
     "DCF": (3, 4, False),
+    "DCG": (3, 4, False),
+    "DCB": (3, 5, False),
+    "DCS": (3, 4, False),
     "DCN": (3, 4, False),
+    "DCLE": (4, 20, True),
     "DWE": (3, 4, False),
     "DW": (3, 4, False),
     "D": (5, 5, False),
@@ -53,10 +64,9 @@ SUFFIX_CONFUSIONS = {
     "S": ("8", "5", "S"),
 }
 
-# Brand detection with common OCR misreads
 KNOWN_BRANDS = {
     "CRAFTSMAN": ["CRAFTSMAN", "CRAFTSMAK", "CRAFTSHAH", "RAFTSMAN", "[RAFTSMAN", "(RAFTSMAN", "CRAFTSMA"],
-    "DEWALT": ["DEWALT", "DEWNALT", "DEWAIT", "DEWALL", "LOEWALT", "LOEWTA", "DĒWALT"],
+    "DEWALT": ["DEWALT", "DEWNALT", "DEWAIT", "DEWALL", "LOEWALT", "LOEWTA", "DĒWALT", "Orwait", "DEWALI", "SEeLT"],
     "RYOBI": ["RYOBI", "RYO3I", "RYOB1"],
     "MILWAUKEE": ["MILWAUKEE", "MILWAUKE", "MILWAUKEF"],
     "MAKITA": ["MAKITA"],
@@ -74,14 +84,10 @@ KNOWN_BRANDS = {
 
 SBD_BRANDS = {"CRAFTSMAN", "DEWALT", "STANLEY", "BLACK+DECKER", "PORTER-CABLE", "IRWIN", "LENOX"}
 
-# SKU patterns based on real Gemini-labeled data:
-# DEWALT: DW618, DW272, DWE402, DCF921, DCN662, DCN623, D26676
-# RYOBI: PBT01B
-# CRAFTSMAN: CMCF801
-# MILWAUKEE: 2851-20
 SKU_PATTERNS = [
-    re.compile(r"\b(CM[A-Z]?[A-Z]?[0-9O][0-9OIl]{2,}[A-Z0-9]*)\b", re.IGNORECASE),  # CRAFTSMAN: CMCF801, CMCF8O1
-    re.compile(r"\b(D[CW][A-Z]?[0-9OIl]{3,}[A-Z0-9]*)\b", re.IGNORECASE),            # DEWALT: DW618, DCF921, DCN662
+    re.compile(r"\b(CM[A-Z]?[A-Z]?[0-9O][0-9OIl]{2,}[A-Z0-9]*)\b", re.IGNORECASE),  # CRAFTSMAN: CMCF801
+    re.compile(r"\b(DCLE[A-Z0-9OIl]{4,})\b", re.IGNORECASE),                         # DEWALT: DCLEAUSBRC1, DCLE142016
+    re.compile(r"\b(D[BCFGNSW][A-Z]?[0-9OIl]{3,}[A-Z0-9]*)\b", re.IGNORECASE),        # DEWALT: DCB1800, DCF921, DCG408, DCS367, DCN662, DW618
     re.compile(r"\b(D[0-9]{4,}[A-Z0-9]*)\b", re.IGNORECASE),                          # DEWALT: D26676
     re.compile(r"\b(PBT[0-9OIl]{2,}[A-Z0-9]*)\b", re.IGNORECASE),                    # RYOBI: PBT01B, PBTOIB
     re.compile(r"\b(GV[0-9OIl]{3,}[A-Z0-9]*)\b", re.IGNORECASE),                     # MAKITA: GV5080z
@@ -120,8 +126,13 @@ def get_reader() -> easyocr.Reader:
     return _reader
 
 
-def preprocess_for_tesseract(image: np.ndarray) -> np.ndarray:
-    """Preprocess image for Tesseract: grayscale, denoise, binarize."""
+def preprocess_for_tesseract(image: np.ndarray, *, fast: bool = False) -> np.ndarray:
+    if fast:
+        resized = resize_for_ocr(image, min_long_edge=1200, max_long_edge=2200)
+        gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
+        _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        return binary
+
     resized = resize_for_ocr(image, min_long_edge=2000, max_long_edge=4000)
     gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
     denoised = cv2.fastNlMeansDenoising(gray, h=12)
@@ -131,17 +142,17 @@ def preprocess_for_tesseract(image: np.ndarray) -> np.ndarray:
     return binary
 
 
-def read_text_tesseract(image: np.ndarray) -> tuple[list[str], float]:
-    """Run Tesseract OCR with PSM 6 + PSM 11 for label text extraction."""
+def read_text_tesseract(image: np.ndarray, *, fast: bool = False) -> tuple[list[str], float]:
     if not TESSERACT_AVAILABLE:
         return [], 0.0
 
-    binary = preprocess_for_tesseract(image)
+    binary = preprocess_for_tesseract(image, fast=fast)
     pil_image = Image.fromarray(binary)
 
     text_store: dict[str, tuple[str, float]] = {}
+    psm_modes = (6,) if fast else (6, 11)
 
-    for psm_mode in (6, 11):
+    for psm_mode in psm_modes:
         config = f"--oem 3 --psm {psm_mode}"
         data = pytesseract.image_to_data(
             pil_image, config=config, output_type=pytesseract.Output.DICT
@@ -162,10 +173,19 @@ def read_text_tesseract(image: np.ndarray) -> tuple[list[str], float]:
 
 
 def has_sufficient_metadata(texts: list[str]) -> bool:
-    """Check if OCR output has SKU or brand — enough to skip EasyOCR."""
     if not texts:
         return False
     return detect_brand(texts) is not None or detect_sku(texts) is not None
+
+
+def zoom_center_crop(image: np.ndarray, crop_ratio: float = 0.6) -> np.ndarray:
+    h, w = image.shape[:2]
+    cw = max(1, int(w * crop_ratio))
+    ch = max(1, int(h * crop_ratio))
+    x1 = (w - cw) // 2
+    y1 = (h - ch) // 2
+    crop = image[y1 : y1 + ch, x1 : x1 + cw]
+    return cv2.resize(crop, (w, h), interpolation=cv2.INTER_CUBIC)
 
 
 def resize_for_ocr(
@@ -173,7 +193,6 @@ def resize_for_ocr(
     min_long_edge: int = 1800,
     max_long_edge: int = 3200,
 ) -> np.ndarray:
-    """Resize an image so small labels are easier to read without exploding memory."""
     h, w = image.shape[:2]
     long_edge = max(h, w)
     scale = 1.0
@@ -193,7 +212,6 @@ def resize_for_ocr_with_scale(
     min_long_edge: int = 1800,
     max_long_edge: int = 3200,
 ) -> tuple[np.ndarray, float]:
-    """Return the resized image plus the applied scale factor."""
     h, w = image.shape[:2]
     long_edge = max(h, w)
     scale = 1.0
@@ -211,29 +229,19 @@ def resize_for_ocr_with_scale(
 
 
 def enhance_image(image: np.ndarray) -> np.ndarray:
-    """Enhance contrast and sharpness while preserving original coordinates."""
-    # Convert to grayscale for processing
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-
-    # Apply CLAHE (adaptive contrast enhancement) to improve text readability
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
     enhanced = clahe.apply(gray)
-
-    # Sharpen
     blurred = cv2.GaussianBlur(enhanced, (0, 0), 3)
     sharpened = cv2.addWeighted(enhanced, 1.5, blurred, -0.5, 0)
-
-    # Convert back to BGR for EasyOCR
     return cv2.cvtColor(sharpened, cv2.COLOR_GRAY2BGR)
 
 
 def preprocess_image(image: np.ndarray) -> np.ndarray:
-    """Enhance image for better OCR: upscale + sharpen + contrast."""
     return enhance_image(resize_for_ocr(image))
 
 
 def threshold_image(image: np.ndarray) -> np.ndarray:
-    """Create a high-contrast variant to help text-region detection."""
     processed = enhance_image(image)
     gray = cv2.cvtColor(processed, cv2.COLOR_BGR2GRAY)
     binary = cv2.adaptiveThreshold(
@@ -254,7 +262,6 @@ def read_text_candidates(
     rotation_info: list[int] | None = None,
     focused: bool = False,
 ) -> list[tuple[list, str, float]]:
-    """Run EasyOCR with parameters tuned for small labels."""
     reader = get_reader()
     results = reader.readtext(
         image,
@@ -284,7 +291,6 @@ def text_signal_length(text: str) -> int:
 
 
 def should_run_focus_rescue(detections: list[tuple[list, str, float]]) -> bool:
-    """Use a slower zoom-in pass only when the first OCR pass is weak."""
     if not detections:
         return True
 
@@ -302,11 +308,7 @@ def box_to_rect(box: list) -> tuple[int, int, int, int]:
 def scale_box_to_original(box: list, scale: float) -> list:
     if scale == 1.0:
         return box
-
-    return [
-        [int(round(point[0] / scale)), int(round(point[1] / scale))]
-        for point in box
-    ]
+    return [[int(round(p[0] / scale)), int(round(p[1] / scale))] for p in box]
 
 
 def scale_region_to_original(
@@ -418,7 +420,6 @@ def regions_from_detections(
 
 
 def detect_text_regions(image: np.ndarray) -> list[tuple[int, int, int, int]]:
-    """Detect text-like regions even when recognition is poor."""
     reader = get_reader()
     resized_image, scale = resize_for_ocr_with_scale(image)
     horizontal_batches, _ = reader.detect(
@@ -472,7 +473,6 @@ def crop_region(image: np.ndarray, region: tuple[int, int, int, int]) -> np.ndar
 
 
 def generate_focus_crops(crop: np.ndarray) -> list[np.ndarray]:
-    """Rotate tall/narrow label crops so text lines become horizontal before OCR."""
     h, w = crop.shape[:2]
     if h > w * 1.25:
         return [
@@ -513,16 +513,10 @@ def summarize_text_store(store: dict[str, tuple[str, float]]) -> tuple[list[str]
 
 
 def extract_text(image: np.ndarray) -> tuple[list[str], float]:
-    """Hybrid OCR: Tesseract first (fast), EasyOCR fallback if needed."""
-    # --- FAST PATH: Tesseract ---
     tess_texts, tess_conf = read_text_tesseract(image)
-
     if has_sufficient_metadata(tess_texts):
         return tess_texts, tess_conf
-
-    # --- SLOW PATH: EasyOCR fallback ---
     text_store: dict[str, tuple[str, float]] = {}
-    # Seed with Tesseract results so they're not lost
     for text in tess_texts:
         key = text.upper()
         if key:
@@ -564,13 +558,6 @@ def extract_text(image: np.ndarray) -> tuple[list[str], float]:
 
 
 def fix_sku_ocr(sku: str, brand_prefix_len: int = 0) -> str:
-    """Fix common OCR errors in SKU codes.
-
-    E.g., CMCF8O1 → CMCF801, PBTOIB → PBT01B, DW6I8 → DW618
-
-    The known prefixes are pure letters. After the prefix, any O→0, I/l→1.
-    """
-    # Known SKU prefixes (pure letter part)
     known_prefixes = list(SKU_PREFIXES)
     prefix = ""
     upper = sku.upper()
@@ -581,10 +568,7 @@ def fix_sku_ocr(sku: str, brand_prefix_len: int = 0) -> str:
 
     if not prefix:
         return sku
-
     rest = sku[len(prefix):]
-
-    # In the rest (numeric/alphanumeric part), fix OCR misreads
     fixed = []
     for ch in rest:
         if ch in ("O", "o"):
@@ -598,7 +582,6 @@ def fix_sku_ocr(sku: str, brand_prefix_len: int = 0) -> str:
 
 
 def normalize_sku_shape(sku: str) -> str:
-    """Trim obvious OCR tail noise while preserving common SKU formats."""
     cleaned = re.sub(r"[^A-Z0-9-]+", "", sku.upper())
 
     for prefix in SKU_PREFIXES:
@@ -634,7 +617,6 @@ def normalize_sku_shape(sku: str) -> str:
 
 
 def expand_ambiguous_suffix(suffix: str, limit: int = 24) -> list[str]:
-    """Generate a small set of likely numeric repairs for OCR-damaged SKU suffixes."""
     candidates = [""]
 
     for char in suffix.upper():
@@ -725,8 +707,6 @@ def detect_serial(texts: list[str], sku: str | None) -> str | None:
             if sku and serial in sku:
                 continue
             serials.append(serial)
-    # If we have multiple number candidates, the SKU-like one may have been
-    # picked as SKU already, so return the first remaining one
     return serials[0] if serials else None
 
 
@@ -744,15 +724,9 @@ def parse_metadata(texts: list[str]) -> dict:
     serial = detect_serial(texts, sku)
     tool_type = detect_tool_type(texts)
     is_sbd = brand in SBD_BRANDS if brand else False
-
-    # If brand is DEWALT but no SKU found, check if serial looks like a D-prefixed SKU
-    # e.g., OCR reads "026676" but actual SKU is "D26676"
     if brand == "DEWALT" and not sku and serial and len(serial) in (5, 6):
-        # Remove leading zero if present: 026676 → D26676
         sku = "D" + serial.lstrip("0")
         serial = detect_serial(texts, sku)
-
-    # If no brand but SKU starts with known prefix, infer brand
     if not brand and sku:
         sku_upper = sku.upper()
         if sku_upper.startswith(("DW", "DC", "D2", "D3")):
@@ -792,9 +766,24 @@ def process_image(image: np.ndarray, filename: str, angle: float = 0.0) -> OCRRe
     )
 
 
-def process_image_fast(image: np.ndarray, filename: str, angle: float = 0.0) -> OCRResult:
-    """Tesseract-only processing for fast rotation scanning."""
-    texts, confidence = read_text_tesseract(image)
+def process_image_fast(
+    image: np.ndarray,
+    filename: str,
+    angle: float = 0.0,
+    *,
+    use_zoom: bool = False,
+) -> OCRResult:
+    texts, confidence = read_text_tesseract(image, fast=True)
+    if use_zoom:
+        zoomed = zoom_center_crop(image, crop_ratio=0.6)
+        texts_zoom, conf_zoom = read_text_tesseract(zoomed, fast=True)
+        seen = {t.upper() for t in texts}
+        for t in texts_zoom:
+            if t.upper() not in seen:
+                texts.append(t)
+                seen.add(t.upper())
+        confidence = max(confidence, conf_zoom)
+
     metadata = parse_metadata(texts)
 
     return OCRResult(

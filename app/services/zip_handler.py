@@ -3,14 +3,10 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"}
+ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp", ".heic", ".heif"}
 
 
 def extract_images_from_zip(zip_path: str) -> tuple[str, list[str]]:
-    """Extract images from a ZIP file into a temporary directory.
-
-    Returns (temp_dir, list_of_image_paths).
-    """
     temp_dir = tempfile.mkdtemp(prefix="ocr_")
     image_paths = []
 
